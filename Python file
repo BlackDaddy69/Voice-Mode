@@ -1,0 +1,143 @@
+import sounddevice as sd
+import numpy as np
+import tkinter as tk
+from scipy.signal import butter, lfilter
+import librosa
+
+# ======================
+# НАСТРОЙКИ
+# ======================
+samplerate = 48000      # VB-Cable WASAPI
+blocksize = 1024        # маленький блок для низкой задержки
+
+pitch_steps = 5          # количество полутона для детского голоса
+noise_threshold = 0.05   # шумовой порог
+lowpass_cutoff = 6000    # отсечение высоких частот (свисты)
+
+stream = None
+
+# ======================
+# ФИЛЬТРЫ
+# ======================
+def noise_gate(audio, threshold):
+    return np.where(np.abs(audio) < threshold, 0, audio)
+
+def lowpass_filter(data, cutoff=6000, fs=48000, order=6):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    y = lfilter(b, a, data)
+    return y
+
+def pitch_shift_librosa(audio, sr, n_steps):
+    # Используем n_fft=512, чтобы работать с блоком 1024
+    audio_shifted = librosa.effects.pitch_shift(
+        audio.astype(np.float32),
+        sr=sr,
+        n_steps=n_steps,
+        n_fft=512
+    )
+    return audio_shifted
+
+# ======================
+# CALLBACK
+# ======================
+def audio_callback(indata, outdata, frames, time, status):
+    global pitch_steps, noise_threshold, lowpass_cutoff
+    if status:
+        print(status)
+
+    audio = indata[:, 0]  # первый канал микрофона
+
+    # шумоподавление
+    audio = noise_gate(audio, noise_threshold)
+
+    # низкочастотное сглаживание
+    audio = lowpass_filter(audio, cutoff=lowpass_cutoff, fs=samplerate)
+
+    # детский голос через librosa pitch shift
+    processed = pitch_shift_librosa(audio, samplerate, pitch_steps)
+
+    # дублируем в 2 канала для VB-Cable
+    outdata[:] = np.column_stack((processed, processed))
+
+# ======================
+# GUI
+# ======================
+def update_pitch(val):
+    global pitch_steps
+    pitch_steps = float(val)
+
+def update_noise(val):
+    global noise_threshold
+    noise_threshold = float(val)
+
+def update_lowpass(val):
+    global lowpass_cutoff
+    lowpass_cutoff = float(val)
+
+def start_audio():
+    global stream
+    if stream is not None:
+        return
+
+    input_device = 23   # Микрофон (ARDOR GAMING Blackout)
+    output_device = 19  # VB-Cable
+
+    try:
+        stream = sd.Stream(
+            callback=audio_callback,
+            samplerate=samplerate,
+            blocksize=blocksize,
+            device=(input_device, output_device),
+            channels=(1, 2),
+            dtype='float32'
+        )
+        stream.start()
+        status_label.config(text="🟢 Включено")
+    except Exception as e:
+        status_label.config(text=f"❌ Ошибка: {e}")
+
+def stop_audio():
+    global stream
+    if stream:
+        stream.stop()
+        stream.close()
+        stream = None
+    status_label.config(text="🔴 Выключено")
+
+def show_devices():
+    print(sd.query_devices())
+
+# ======================
+# GUI
+# ======================
+root = tk.Tk()
+root.title("Voice Changer (VB-Cable, чистый детский)")
+
+tk.Label(root, text="Pitch (полутона)").pack()
+slider_pitch = tk.Scale(root, from_=1, to=12, resolution=1,
+                        orient=tk.HORIZONTAL, command=update_pitch)
+slider_pitch.set(pitch_steps)
+slider_pitch.pack()
+
+tk.Label(root, text="Noise Gate (шумоподавление)").pack()
+slider_noise = tk.Scale(root, from_=0.0, to=0.1, resolution=0.005,
+                        orient=tk.HORIZONTAL, command=update_noise)
+slider_noise.set(noise_threshold)
+slider_noise.pack()
+
+tk.Label(root, text="Lowpass фильтр (удаляет свисты)").pack()
+slider_lowpass = tk.Scale(root, from_=1000, to=10000, resolution=500,
+                          orient=tk.HORIZONTAL, command=update_lowpass)
+slider_lowpass.set(lowpass_cutoff)
+slider_lowpass.pack()
+
+tk.Button(root, text="Показать устройства (консоль)", command=show_devices).pack()
+tk.Button(root, text="Старт", command=start_audio).pack()
+tk.Button(root, text="Стоп", command=stop_audio).pack()
+
+status_label = tk.Label(root, text="🔴 Выключено")
+status_label.pack()
+
+root.mainloop()
